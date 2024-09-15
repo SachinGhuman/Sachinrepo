@@ -1,0 +1,129 @@
+#!/bin/bash
+
+set -e
+
+# Step 1: Data Download
+echo "Starting download of SRA files"
+mkdir -p RNAseq_Analysis/Data/Raw
+cd RNAseq_Analysis/Data/Raw
+
+for id in SRR29950651 SRR29950669 SRR29950681; do
+    # Download the SRA file using prefetch
+    prefetch $id
+    # Convert the downloaded SRA file to FASTQ format
+    fastq-dump $id
+done
+
+echo "Download and conversion to FASTQ complete"
+
+# Step 2: Reference Genome Download
+echo "Downloading reference genome and annotation files"
+cd ~/RNAseq_Analysis
+
+mkdir -p Reference_Genome
+cd Reference_Genome
+
+wget https://ftp.ensembl.org/pub/release-112/fasta/drosophila_melanogaster/dna/Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa.gz
+gunzip Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa.gz
+
+wget https://ftp.ensembl.org/pub/release-112/gtf/drosophila_melanogaster/Drosophila_melanogaster.BDGP6.46.112.gtf.gz
+gunzip Drosophila_melanogaster.BDGP6.46.112.gtf.gz
+
+echo "Reference genome and annotation files downloaded and unzipped"
+
+# Step 3: Quality Control
+echo "Starting quality control with FastQC"
+mkdir -p ~/RNAseq_Analysis/QC_Reports/Raw
+cd ~/RNAseq_Analysis/Data/Raw
+for file in *.fastq; do
+    fastqc $file -o ~/RNAseq_Analysis/QC_Reports/Raw
+done
+
+echo "Quality control complete"
+
+# Calculate the total number of reads in each FASTQ file
+echo "Calculating total number of reads in each FASTQ file"
+for file in *.fastq; do
+    total_lines=$(wc -l < "$file")
+    total_reads=$((total_lines / 4))
+    echo "$file: $total_reads reads" | tee -a read_counts_before_trimming.txt
+done
+
+echo "Read count before trimming complete"
+
+cd ~/RNAseq_Analysis
+multiqc .
+
+# Step 4: Read Trimming
+echo "Starting trimming of reads"
+mkdir -p ~/RNAseq_Analysis/Data/Trimmed
+cd ~/RNAseq_Analysis/Data/Raw
+for file in *.fastq; do
+    base=$(basename "$file" .fastq)
+    skewer -q 20 -o ~/RNAseq_Analysis/Data/Trimmed/"$base" $file
+done
+
+echo "Trimming complete"
+
+# Calculate the total number of reads in each FASTQ file after trimming
+echo "Calculating total number of reads in each trimmed FASTQ file"
+cd ~/RNAseq_Analysis/Data/Trimmed
+for file in *-trimmed.fastq; do
+    total_lines=$(wc -l < "$file")
+    total_reads=$((total_lines / 4))
+    echo "$file: $total_reads reads" | tee -a read_counts_after_trimming.txt
+done
+
+echo "Read count after trimming complete"
+
+# MultiQC
+cd ~/RNAseq_Analysis
+multiqc .
+
+# Step 5: Reference Genome Indexing
+echo "Indexing the reference genome..."
+cd ~/RNAseq_Analysis/Reference_Genome
+bwa index Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa
+
+echo "Reference genome indexing complete"
+
+# Step 6: Read Alignment
+echo "Starting alignment of trimmed reads to the reference genome"
+cd ~/RNAseq_Analysis/Data
+mkdir -p Aligned
+for file in ./Trimmed/*-trimmed.fastq; do
+    base=$(basename "$file" -trimmed.fastq)
+    bwa mem ../Reference_Genome/Drosophila_melanogaster.BDGP6.46.dna.toplevel.fa "$file" > "./Aligned/${base}.sam"
+done
+
+echo "Alignment complete"
+
+# Step 7: BAM Conversion, Sorting, and Indexing
+echo "Converting SAM to BAM, sorting, and indexing BAM files"
+cd ~/RNAseq_Analysis/Data/Aligned
+for file in *.sam; do
+    base=$(basename "$file" .sam)
+
+    samtools view -bq 50 "$file" -o "${base}.bam"
+    samtools sort "${base}.bam" -o "${base}_sorted.bam"
+    samtools index "${base}_sorted.bam"
+    samtools flagstat "${base}_sorted.bam" > "${base}_flagstat.txt"
+done
+
+echo "BAM conversion, sorting, and indexing complete"
+
+#Step 8: Visualization
+# This is an manual step where IGV is used to visualize BAM files
+
+# Step 9: Read Counting
+echo "Starting read counting with HTSeq-count"
+mkdir -p ~/RNAseq_Analysis/Counts
+cd ~/RNAseq_Analysis/Counts
+for file in ../Data/Aligned/*_sorted.bam; do
+    base=$(basename "$file" _sorted.bam)
+    htseq-count -f bam "$file" ../Reference_Genome/Drosophila_melanogaster.BDGP6.46.112.gtf > "${base}.txt"
+done
+
+echo "Read counting complete."
+echo "Pipeline complete."
+
